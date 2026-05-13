@@ -1,12 +1,12 @@
 #!/usr/local/bin/python
 """
-Docstring for 2026_autoreject-pipeline.bin.resting_preproc-autoreject
+Docstring for bin.eegml_resting_preproc-autoreject
 
 versions:
-python = 3.8
-autorejcet = 0.4.2
-MNE Python (v.X)
-MNE-BIDS (v.X)
+python = 3.12
+autoreject = 0.4.3
+MNE Python = 1.10.2
+MNE-BIDS = 0.17.0
 """
 
 from pathlib import Path
@@ -20,7 +20,7 @@ from mne_bids import read_raw_bids, BIDSPath
 from autoreject import AutoReject
 
 OVERWRITE = True
-DEBUG = True
+DEBUG = False
 EXPORT_FMT = "fif"  # "fif" or "set"
 assert EXPORT_FMT in ("fif", "set")
 
@@ -214,8 +214,12 @@ if __name__ == "__main__":
         sub_id = "HajD0031"  # "HajD0031","HajD0311"
     else:
         bids_root, sub_id, results_dir = sys.argv[-3:]
+    
+    print("BIDSRoot:",bids_root)
+    print("OutDir:",results_dir)
+    print("SubId", sub_id)
     bids_root, results_dir = _initial_checks(bids_root, results_dir)
-
+    
     # preprocess data
     if OVERWRITE or (sub_id not in str(list(results_dir.glob("*")))):
         raw, fname_base = _load_raw_bids(bids_root, sub_id)
@@ -224,3 +228,4 @@ if __name__ == "__main__":
             savename=results_dir / f"{fname_base}eeg-epo.tmp",
             detrend_mode="DC",
         )
+
