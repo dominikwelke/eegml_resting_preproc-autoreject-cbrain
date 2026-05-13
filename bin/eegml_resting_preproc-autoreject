@@ -213,13 +213,13 @@ if __name__ == "__main__":
         results_dir = module_root / "testdata" / "out"
         sub_id = "HajD0031"  # "HajD0031","HajD0311"
     else:
-        bids_root, sub_id, results_dir = sys.argv[-3:]
-    
-    print("BIDSRoot:",bids_root)
-    print("OutDir:",results_dir)
+        bids_root, results_dir, sub_id = sys.argv[-3:]
+
+    print("BIDSRoot:", bids_root)
+    print("OutDir:", results_dir)
     print("SubId", sub_id)
     bids_root, results_dir = _initial_checks(bids_root, results_dir)
-    
+
     # preprocess data
     if OVERWRITE or (sub_id not in str(list(results_dir.glob("*")))):
         raw, fname_base = _load_raw_bids(bids_root, sub_id)
@@ -228,4 +228,3 @@ if __name__ == "__main__":
             savename=results_dir / f"{fname_base}eeg-epo.tmp",
             detrend_mode="DC",
         )
-
