@@ -1,0 +1,226 @@
+#!/usr/local/bin/python
+"""
+Docstring for 2026_autoreject-pipeline.bin.resting_preproc-autoreject
+
+versions:
+python = 3.8
+autorejcet = 0.4.2
+MNE Python (v.X)
+MNE-BIDS (v.X)
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import sys
+
+import mne
+from mne_bids import read_raw_bids, BIDSPath
+from autoreject import AutoReject
+
+OVERWRITE = True
+DEBUG = True
+EXPORT_FMT = "fif"  # "fif" or "set"
+assert EXPORT_FMT in ("fif", "set")
+
+
+def _initial_checks(bids_root, results_dir):
+    try:
+        bids_root = Path(bids_root)
+        results_dir = Path(results_dir)
+        assert bids_root.exists()
+        assert results_dir.exists()
+    except Exception:
+        raise ValueError("No valid paths provided for BIDS_root and result folder.")
+
+    return bids_root, results_dir
+
+
+def _load_raw_bids(bids_root, sub_id):
+    bids_path = BIDSPath(
+        subject=sub_id.strip("sub-"), task="resting", root=bids_root, suffix="eeg"
+    )
+    # find session id if present (can be introduced by eegnet)
+    # quick and dirty fix; just use the first one!
+    session = None
+    for bp in bids_path.match():
+        if "_ses-" in bp.basename and "task-resting" in bp.basename:
+            session = bp.fpath.parents[1].name.strip("ses-")
+            break  # just take the first
+    bids_path.update(session=session)
+    # load data
+    raw = read_raw_bids(bids_path=bids_path)
+    fname_base = Path(bids_path).with_suffix("").name.strip("eeg")
+    return raw, fname_base
+
+
+def _preprocess_autoreject(
+    raw, savename, detrend_mode="highpass", clean_mode="autoreject"
+):
+    if detrend_mode not in [None, "highpass", "DC", "linear"]:
+        raise ValueError(
+            f'mode must be one of [None, "highpass", "DC", "linear"]. got {detrend_mode} instead.'
+        )
+    if clean_mode not in [None, "autoreject", "ransac"]:
+        raise ValueError(
+            f'mode must be one of [None, "autoreject", "ransac"]. got {clean_mode} instead.'
+        )
+
+    random_state = 0
+
+    # keep only eeg
+    raw.load_data()
+    raw.pick("eeg")
+
+    # deal with case of sensor names
+    montage = mne.channels.make_standard_montage("standard_1020")
+    for ch_raw in raw.ch_names:
+        for ch_mont in montage.ch_names:
+            if ch_raw.lower() == ch_mont.lower():
+                mne.rename_channels(raw.info, {ch_raw: ch_mont})
+    raw.set_montage(montage)
+
+    # resample to 200 hz
+    raw_preprocessed = raw.copy().resample(200)
+
+    # filter / detrend
+    if detrend_mode == "DC":
+        detrend = 0
+    # elif detrend_mode == "highpass":
+    #    raw_preprocessed.filter(l_freq=0.1, h_freq=None)  # None
+    #    detrend = None
+    else:
+        raise ValueError
+
+    # epoch
+    if False:
+        # simple method
+        ep = mne.make_fixed_length_epochs(
+            raw_preprocessed,
+            duration=1,
+            preload=True,
+            reject_by_annotation=False,
+            overlap=0,
+        )
+    else:
+        # here i construct the events myself to have more control. this way i only use trial data
+        tmin, tmax = -1, 60
+        rangemat = np.arange(tmin, tmax + 0.1, 0.5)
+        sfreq = raw_preprocessed.info["sfreq"]
+        ev, evid = mne.events_from_annotations(raw_preprocessed)
+        evnew = []
+        for e in ev:
+            eee = e.repeat(len(rangemat)).reshape([3, len(rangemat)]).T
+            eee[:, 0] = eee[:, 0] + rangemat * sfreq
+            evnew.append(eee)
+        evnew = np.concat(evnew)
+        ep = mne.Epochs(
+            raw_preprocessed,
+            events=evnew,
+            event_id=evid,
+            tmin=0,
+            tmax=1.0,
+            baseline=None,
+            detrend=detrend,
+            preload=True,
+        )
+
+    # cleaning step
+    if clean_mode and clean_mode.lower() == "autoreject":
+        # autoreject
+        ar = AutoReject(random_state=random_state, cv=10, picks="eeg")
+        # ep_preprocessed, reject_log = ar.fit_transform(ep, return_log=True)
+        ar = ar.fit(ep)
+        ep_preprocessed, reject_log = ar.transform(ep, return_log=True)
+
+        # save everything
+        savename_stem = "-".join(savename.name.split("-")[:-1])
+        # save epochs
+        if EXPORT_FMT == "fif":
+            ep_preprocessed.save(
+                savename.with_suffix(".fif.gz"),
+                split_naming="bids",
+                fmt="double",
+                overwrite=OVERWRITE,
+            )
+        elif EXPORT_FMT == "set":
+            ep_preprocessed.export(
+                savename.with_suffix(".set"), fmt="eeglab", overwrite=OVERWRITE
+            )
+        else:
+            raise ValueError
+        # save autoreject object
+        ar.save(savename.with_name(savename_stem + "-epo-AR.hdf5"))
+        # save plot
+        f = reject_log.plot("horizontal", show=False)
+        f.savefig(savename.with_name(savename_stem + "-epo-drop.png"))
+        plt.close(f)
+        # save drop_log
+        df_drop = pd.DataFrame(ep.events, columns=["sample", "duration", "value"])
+        df_drop["onset"] = df_drop["sample"] / sfreq
+        df_drop["event_id"] = df_drop["value"].apply(
+            lambda x: {v: k for k, v in evid.items()}[x]
+        )
+        df_drop["drop_log"] = ep_preprocessed.drop_log
+        df_drop[
+            ["onset", "duration", "value", "event_id", "sample", "drop_log"]
+        ].to_csv(
+            savename.with_name(savename_stem + "-epo-drop.tsv"), sep="\t", index=False
+        )
+        # save urevents
+        df_orig = pd.DataFrame(ev, columns=["sample", "duration", "value"])
+        df_orig["onset"] = df_orig["sample"] / sfreq
+        df_orig["event_id"] = df_orig["value"].apply(
+            lambda x: {v: k for k, v in evid.items()}[x]
+        )
+        df_orig[["onset", "duration", "value", "event_id", "sample"]].to_csv(
+            savename.with_name(savename_stem + "-urevents.tsv"), sep="\t", index=False
+        )
+
+    else:
+        raise ValueError
+
+    # rebuild continuous (not making sense with overlapping epochs)
+    if False:
+        data_new = ep_preprocessed.get_data()
+        d, i = [], 0
+        for drop in ep_preprocessed.drop_log:
+            if "AUTOREJECT" in drop:
+                d.append(np.zeros(data_new.shape[1:]))
+            else:
+                d.append(data_new[i])
+                i += 1
+        data_new = np.concat(d, axis=1)
+        raw_clean = mne.io.RawArray(data=data_new, info=raw.info)
+        raw_clean = raw_clean.set_annotations(raw.annotations)
+        ep_clean = mne.make_fixed_length_epochs(
+            raw_clean, duration=1, preload=True, reject_by_annotation=False, overlap=0
+        )
+
+    # TODO apply average reference?
+    if False:
+        ep_preprocessed.set_eeg_reference("average")
+
+    return ep_preprocessed
+
+
+if __name__ == "__main__":
+    # get paths
+    if DEBUG:
+        module_root = Path(__file__).parents[1]
+        bids_root = module_root / "testdata" / "in"
+        results_dir = module_root / "testdata" / "out"
+        sub_id = "HajD0031"  # "HajD0031","HajD0311"
+    else:
+        bids_root, sub_id, results_dir = sys.argv[-3:]
+    bids_root, results_dir = _initial_checks(bids_root, results_dir)
+
+    # preprocess data
+    if OVERWRITE or (sub_id not in str(list(results_dir.glob("*")))):
+        raw, fname_base = _load_raw_bids(bids_root, sub_id)
+        ep_preprocessed = _preprocess_autoreject(
+            raw,
+            savename=results_dir / f"{fname_base}eeg-epo.tmp",
+            detrend_mode="DC",
+        )
