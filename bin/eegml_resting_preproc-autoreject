@@ -152,6 +152,8 @@ def _preprocess_autoreject(
             raise ValueError
         # save autoreject object
         ar.save(savename.with_name(savename_stem + "-epo-AR.hdf5"))
+        # save reject_log
+        reject_log.save(savename.with_name(savename_stem + "-epo-ARlog.npz"))
         # save plot
         f = reject_log.plot("horizontal", show=False)
         f.savefig(savename.with_name(savename_stem + "-epo-drop.png"))
