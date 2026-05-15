@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import sys
+import json
 
 import mne
 from mne_bids import read_raw_bids, BIDSPath
@@ -68,6 +69,7 @@ def _preprocess_autoreject(
         )
 
     random_state = 0
+    fname_raw = raw.filenames[0]
 
     # keep only eeg
     raw.load_data()
@@ -108,7 +110,9 @@ def _preprocess_autoreject(
         tmin, tmax = -1, 60
         rangemat = np.arange(tmin, tmax + 0.1, 0.5)
         sfreq = raw_preprocessed.info["sfreq"]
-        ev, evid = mne.events_from_annotations(raw_preprocessed)
+        ev, evid = mne.events_from_annotations(
+            raw_preprocessed, event_id={"eyes open": 1, "eyes close": 2}
+        )
         evnew = []
         for e in ev:
             eee = e.repeat(len(rangemat)).reshape([3, len(rangemat)]).T
@@ -136,20 +140,6 @@ def _preprocess_autoreject(
 
         # save everything
         savename_stem = "-".join(savename.name.split("-")[:-1])
-        # save epochs
-        if EXPORT_FMT == "fif":
-            ep_preprocessed.save(
-                savename.with_suffix(".fif.gz"),
-                split_naming="bids",
-                fmt="double",
-                overwrite=OVERWRITE,
-            )
-        elif EXPORT_FMT == "set":
-            ep_preprocessed.export(
-                savename.with_suffix(".set"), fmt="eeglab", overwrite=OVERWRITE
-            )
-        else:
-            raise ValueError
         # save autoreject object
         ar.save(savename.with_name(savename_stem + "-epo-AR.hdf5"))
         # save reject_log
@@ -172,11 +162,21 @@ def _preprocess_autoreject(
         )
         # save urevents
         df_orig = pd.DataFrame(ev, columns=["sample", "duration", "value"])
+        df_orig_ = pd.read_csv(
+            fname_raw.with_name(fname_base + "events.tsv"), sep="\t"
+        ).rename(columns={"onset": "uronset", "sample": "ursample"})
         df_orig["onset"] = df_orig["sample"] / sfreq
         df_orig["event_id"] = df_orig["value"].apply(
             lambda x: {v: k for k, v in evid.items()}[x]
         )
-        df_orig[["onset", "duration", "value", "event_id", "sample"]].to_csv(
+        df_orig["ursample"] = df_orig_["ursample"]
+        df_orig["uronset"] = df_orig_["uronset"]
+        assert all(df_orig["event_id"] == df_orig_["trial_type"])
+        assert all(df_orig["value"] == df_orig_["value"])
+
+        df_orig[
+            ["onset", "uronset", "duration", "value", "event_id", "sample", "ursample"]
+        ].to_csv(
             savename.with_name(savename_stem + "-urevents.tsv"), sep="\t", index=False
         )
 
@@ -200,9 +200,27 @@ def _preprocess_autoreject(
             raw_clean, duration=1, preload=True, reject_by_annotation=False, overlap=0
         )
 
-    # TODO apply average reference?
-    if False:
-        ep_preprocessed.set_eeg_reference("average")
+    # apply average reference
+    recording_ref = json.loads(fname_raw.with_suffix(".json").read_text())[
+        "EEGReference"
+    ]
+    ep_preprocessed = mne.add_reference_channels(ep_preprocessed, recording_ref)
+    ep_preprocessed.set_eeg_reference("average")
+
+    # save epochs
+    if EXPORT_FMT == "fif":
+        ep_preprocessed.save(
+            savename.with_suffix(".fif.gz"),
+            split_naming="bids",
+            fmt="double",
+            overwrite=OVERWRITE,
+        )
+    elif EXPORT_FMT == "set":
+        ep_preprocessed.export(
+            savename.with_suffix(".set"), fmt="eeglab", overwrite=OVERWRITE
+        )
+    else:
+        raise ValueError
 
     return ep_preprocessed
 
